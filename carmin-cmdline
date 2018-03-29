@@ -1,0 +1,131 @@
+#!/bin/bash
+set -eu
+set -C  # no clobber -- everything is semantically explicit
+
+CARDIR=${CARDIR:-.carmin}
+JOBDIR=${CARDIR}/jobs     # where all the information about jobs is
+LOGDIR=${JOBDIR}/logs # next jobid to use
+
+NEXTID=${JOBDIR}/job-next # next jobid to use
+LASTERR=${LOGDIR}/last-error
+
+info() {
+	echo "I: $@"
+}
+error() {
+	echo "$@" >| $LOGDIR/last-error
+}
+
+exec_job() {
+	jid=$(new_jobid)
+	JOB=$JOBDIR/$jid/
+	echo "$(($jid+1))" >| "$NEXTID"
+	mkdir -p "$JOB"
+	(
+		sh -c "$@" 1>"${JOB}out" 2>"${JOB}err" &
+		echo $! > "${JOB}pid";
+	)
+	info "Started Job $jid"
+}
+
+new_jobid() {
+	cat "$NEXTID" 2>/dev/null || echo 1
+}
+
+echo_error() {
+	ret=$1
+	shift
+	cat <<JSON
+{
+   "errorCode": $ret,
+   "errorMessage": "$@"
+}
+JSON
+}
+
+get_list() {
+	out=""
+	for l in $@; do
+		out+="\"$l\", "
+	done
+	echo $out | sed -e 's/, *$//g' -e 's,.*,[\0],g'
+}
+
+# API functions
+SUPPORTED_PROTOCOLS="nul"
+SUPPORTED_MODULES="Conversion Processing"
+# ???: Shouldn't this be per pipeline
+SUPPORTED_PIPELINE_PROPERTIES=""
+UNSUPPORTED_METHODS="talk-to-god"
+
+DEFAULT_STUDY="SomeDefaultStudy"
+
+api_platform() {
+	cat <<EOF
+{
+  "platformName": "`hostname --fqdn`",
+  "APIErrorCodesAndMessages": [
+    {
+      "errorCode": 0,
+      "errorMessage": "string"
+    }
+  ],
+  "supportedTransferProtocols": `get_list $SUPPORTED_PROTOCOLS`,
+  "supportedModules": `get_list $SUPPORTED_PROTOCOLS`,
+  "defaultLimitListExecutions": 0,
+  "email": "${EMAIL}",
+  "platformDescription": "`uname --all`",
+  "minAuthorizedExecutionTimeout": 0,
+  "maxAuthorizedExecutionTimeout": 0,
+  "defaultExecutionTimeout": 0,
+  "unsupportedMethods": `get_list $UNSUPPORTED_METHODS`,
+  "defaultStudy": "$DEFAULT_STUDY",
+  "supportedAPIVersion": "0.3",
+  "supportedPipelineProperties": `get_list $SUPPORTED_PIPELINE_PROPERTIES`,
+}
+EOF
+}
+
+api_authenticate() {
+	echo_error 0 "not needed"
+}
+
+api_executions_count() {
+	if [ ! -e "$JOBDIR" ]; then
+		echo "$JOBDIR does not exist" >&2
+		return 1
+	fi
+	c=$(/bin/ls -d "$JOBDIR"/* | wc -l)
+	echo $c
+}
+
+# ATM supports mkdir (no content) or upload of "application/carmin+json"
+# We might want: "application/datalad+ri" or alike to specify
+# a list of datasets (with somehow needed components maybe) to be
+# provided.
+api_path() {
+}
+
+# prepare the "environment"
+mkdir -p "$JOBDIR" "$LOGDIR"
+func=$(echo $1 | sed -e 's,^/,,g' -e 's,/,_,g')
+
+set +e
+api_$func "$@" 2>|"$LASTERR"
+ret=$?
+set -e
+
+if [ $ret != 0 ]; then
+	err=""
+	if [ -e "$LASTERR" ]; then
+		err=$(cat "$LASTERR")
+	fi
+	echo_error $ret "$err"
+fi
+
+# TODO: move into trap
+rm -f "$LASTERR"
+
+exit $ret
+#exec_job "$@"
+
